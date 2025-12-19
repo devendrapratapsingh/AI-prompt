@@ -1,0 +1,54 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: "us-east-1"
+    AWS_ACCOUNT_ID: "123456789012"
+  parameter-store:
+    DB_PASSWORD: /myapp/db/password
+
+cache:
+  paths:
+    - 'node_modules/**/*'
+
+phases:
+  pre_build:
+    commands:
+      - echo "Installing dependencies on `date`"
+      - npm ci --prefer-offline
+      - echo "Logging in to ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+  build:
+    commands:
+      - echo "Building application..."
+      - npm run build
+      - echo "Running tests..."
+      - npm run test -- --coverage
+      - echo "Building Docker image..."
+      - docker build -t myapp:$CODEBUILD_RESOLVED_SOURCE_VERSION .
+      - docker tag myapp:$CODEBUILD_RESOLVED_SOURCE_VERSION $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/myapp:latest
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/myapp:latest
+
+  post_build:
+    commands:
+      - echo "Build completed on `date`"
+      - printf '[{"name":"myapp","imageUri":"%s"}]' $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/myapp:latest > imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - '**/*'
+  name: BuildArtifact
+  discard-paths: yes
+
+reports:
+  coverage:
+    files:
+      - 'coverage/cobertura-coverage.xml'
+    file-format: 'COBERTURAXML'
+  
+  test:
+    files:
+      - 'test-results.xml'
+    file-format: 'JUNITXML'

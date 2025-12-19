@@ -1,0 +1,446 @@
+# Advanced CI/CD Pipeline for Azure Pipelines
+# This pipeline demonstrates complex multi-branch, parallel execution, conditional deployments
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+      - release/*
+  paths:
+    include:
+      - src/*
+      - tests/*
+      - azure-pipelines.yml
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+variables:
+  - group: production-vars
+  - group: staging-vars
+  - name: vmImage
+    value: 'ubuntu-latest'
+  - name: buildConfiguration
+    value: 'Release'
+  - name: DOCKER_REGISTRY
+    value: 'myregistry.azurecr.io'
+  - name: IMAGE_NAME
+    value: 'myapp'
+
+stages:
+  # Stage 1: Build for Multiple Platforms
+  - stage: Build
+    displayName: 'Build Stage'
+    jobs:
+      - job: BuildLinux
+        displayName: 'Build on Linux'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          matrix:
+            Node16:
+              node_version: '16.x'
+            Node18:
+              node_version: '18.x'
+            Node20:
+              node_version: '20.x'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(node_version)
+            displayName: 'Install Node.js $(node_version)'
+          
+          - script: |
+              npm ci
+              npm run build
+            displayName: 'npm install and build'
+          
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: 'dist'
+              ArtifactName: 'dist-linux-$(node_version)'
+              publishLocation: 'Container'
+
+      - job: BuildWindows
+        displayName: 'Build on Windows'
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+            displayName: 'Install Node.js'
+          
+          - script: |
+              npm ci
+              npm run build
+            displayName: 'npm install and build'
+          
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: 'dist'
+              ArtifactName: 'dist-windows'
+              publishLocation: 'Container'
+
+      - job: BuildMacOS
+        displayName: 'Build on macOS'
+        pool:
+          vmImage: 'macos-latest'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+            displayName: 'Install Node.js'
+          
+          - script: |
+              npm ci
+              npm run build
+            displayName: 'npm install and build'
+          
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: 'dist'
+              ArtifactName: 'dist-macos'
+              publishLocation: 'Container'
+
+  # Stage 2: Comprehensive Testing
+  - stage: Test
+    displayName: 'Test Stage'
+    dependsOn: Build
+    jobs:
+      - job: UnitTests
+        displayName: 'Unit Tests'
+        pool:
+          vmImage: $(vmImage)
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+          
+          - script: npm ci
+            displayName: 'Install dependencies'
+          
+          - script: npm run test:unit -- --coverage
+            displayName: 'Run unit tests'
+          
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/junit.xml'
+              mergeTestResults: true
+              failTaskOnFailedTests: true
+          
+          - task: PublishCodeCoverageResults@1
+            inputs:
+              codeCoverageTool: 'Cobertura'
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/coverage/cobertura-coverage.xml'
+              reportDirectory: '$(System.DefaultWorkingDirectory)/**/coverage'
+
+      - job: IntegrationTests
+        displayName: 'Integration Tests'
+        pool:
+          vmImage: $(vmImage)
+        services:
+          postgres: postgres:15
+          redis: redis:7
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+          
+          - script: npm ci
+            displayName: 'Install dependencies'
+          
+          - script: npm run test:integration
+            displayName: 'Run integration tests'
+            env:
+              DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+              REDIS_URL: redis://localhost:6379
+
+      - job: E2ETests
+        displayName: 'E2E Tests'
+        pool:
+          vmImage: $(vmImage)
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+          
+          - script: |
+              npm ci
+              npm start &
+              sleep 10
+              npm run test:e2e
+            displayName: 'Run E2E tests'
+
+  # Stage 3: Code Quality & Security
+  - stage: Quality
+    displayName: 'Quality & Security'
+    dependsOn: Build
+    jobs:
+      - job: CodeQuality
+        displayName: 'Code Quality Analysis'
+        pool:
+          vmImage: $(vmImage)
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+          
+          - script: npm ci
+            displayName: 'Install dependencies'
+          
+          - script: npm run lint
+            displayName: 'Run ESLint'
+            continueOnError: true
+          
+          - script: npm run format:check
+            displayName: 'Check code formatting'
+            continueOnError: true
+          
+          - task: SonarCloudPrepare@1
+            inputs:
+              SonarCloud: 'SonarCloud'
+              organization: 'my-org'
+              scannerMode: 'CLI'
+              configMode: 'manual'
+              cliProjectKey: 'my-project'
+          
+          - task: SonarCloudAnalyze@1
+          
+          - task: SonarCloudPublish@1
+            inputs:
+              pollingTimeoutSec: '300'
+
+      - job: SecurityScan
+        displayName: 'Security Scanning'
+        pool:
+          vmImage: $(vmImage)
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+          
+          - script: npm ci
+            displayName: 'Install dependencies'
+          
+          - script: npm audit --audit-level=high
+            displayName: 'npm audit'
+            continueOnError: true
+          
+          - task: WhiteSource@21
+            inputs:
+              cwd: '$(System.DefaultWorkingDirectory)'
+          
+          - script: |
+              npm install -g snyk
+              snyk test --severity-threshold=high
+            displayName: 'Snyk security scan'
+            continueOnError: true
+            env:
+              SNYK_TOKEN: $(SNYK_TOKEN)
+
+  # Stage 4: Docker Build & Scan
+  - stage: Package
+    displayName: 'Package & Scan'
+    dependsOn:
+      - Test
+      - Quality
+    condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.SourceBranch'], 'refs/heads/develop')))
+    jobs:
+      - job: DockerBuild
+        displayName: 'Build Docker Image'
+        pool:
+          vmImage: $(vmImage)
+        steps:
+          - task: Docker@2
+            displayName: 'Login to Azure Container Registry'
+            inputs:
+              command: login
+              containerRegistry: 'myACRConnection'
+          
+          - task: Docker@2
+            displayName: 'Build Docker image'
+            inputs:
+              command: build
+              repository: $(IMAGE_NAME)
+              dockerfile: '**/Dockerfile'
+              tags: |
+                $(Build.BuildId)
+                latest
+              arguments: '--build-arg BUILD_NUMBER=$(Build.BuildId)'
+          
+          - task: Docker@2
+            displayName: 'Push Docker image'
+            inputs:
+              command: push
+              repository: $(IMAGE_NAME)
+              tags: |
+                $(Build.BuildId)
+                latest
+          
+          - task: AzureKeyVault@2
+            inputs:
+              azureSubscription: 'MyAzureSubscription'
+              KeyVaultName: 'my-keyvault'
+              SecretsFilter: '*'
+
+      - job: ContainerScan
+        displayName: 'Container Security Scan'
+        dependsOn: DockerBuild
+        pool:
+          vmImage: $(vmImage)
+        steps:
+          - script: |
+              docker pull aquasec/trivy:latest
+              docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                aquasec/trivy:latest image --severity HIGH,CRITICAL \
+                $(DOCKER_REGISTRY)/$(IMAGE_NAME):$(Build.BuildId)
+            displayName: 'Trivy container scan'
+            continueOnError: true
+
+  # Stage 5: Deploy to Development
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: Package
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployDev
+        displayName: 'Deploy to Dev Environment'
+        environment: 'development'
+        pool:
+          vmImage: $(vmImage)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebAppContainer@1
+                  displayName: 'Deploy to Azure Web App'
+                  inputs:
+                    azureSubscription: 'MyAzureSubscription'
+                    appName: 'myapp-dev'
+                    containers: '$(DOCKER_REGISTRY)/$(IMAGE_NAME):$(Build.BuildId)'
+                
+                - task: AzureCLI@2
+                  displayName: 'Update App Settings'
+                  inputs:
+                    azureSubscription: 'MyAzureSubscription'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az webapp config appsettings set \
+                        --resource-group myResourceGroup \
+                        --name myapp-dev \
+                        --settings BUILD_ID=$(Build.BuildId)
+
+  # Stage 6: Deploy to Staging
+  - stage: DeployStaging
+    displayName: 'Deploy to Staging'
+    dependsOn: Package
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployStaging
+        displayName: 'Deploy to Staging Environment'
+        environment: 'staging'
+        pool:
+          vmImage: $(vmImage)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: Kubernetes@1
+                  displayName: 'kubectl apply staging'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceEndpoint: 'k8s-staging'
+                    namespace: 'staging'
+                    command: 'apply'
+                    arguments: '-f k8s/staging/'
+                
+                - task: Kubernetes@1
+                  displayName: 'Update image'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceEndpoint: 'k8s-staging'
+                    namespace: 'staging'
+                    command: 'set'
+                    arguments: 'image deployment/myapp myapp=$(DOCKER_REGISTRY)/$(IMAGE_NAME):$(Build.BuildId)'
+
+  # Stage 7: Deploy to Production
+  - stage: DeployProduction
+    displayName: 'Deploy to Production'
+    dependsOn: DeployStaging
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployProduction
+        displayName: 'Deploy to Production Environment'
+        environment: 'production'
+        pool:
+          vmImage: $(vmImage)
+        strategy:
+          canary:
+            increments: [10, 25, 50, 100]
+            deploy:
+              steps:
+                - task: Kubernetes@1
+                  displayName: 'kubectl apply production'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceEndpoint: 'k8s-production'
+                    namespace: 'production'
+                    command: 'apply'
+                    arguments: '-f k8s/production/'
+                
+                - task: Kubernetes@1
+                  displayName: 'Update image'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceEndpoint: 'k8s-production'
+                    namespace: 'production'
+                    command: 'set'
+                    arguments: 'image deployment/myapp myapp=$(DOCKER_REGISTRY)/$(IMAGE_NAME):$(Build.BuildId)'
+                
+                - script: |
+                    echo "Monitoring deployment for 5 minutes..."
+                    sleep 300
+                  displayName: 'Monitor canary deployment'
+
+  # Stage 8: Post-Deployment Verification
+  - stage: PostDeployment
+    displayName: 'Post-Deployment Verification'
+    dependsOn: DeployProduction
+    jobs:
+      - job: SmokeTests
+        displayName: 'Run Smoke Tests'
+        pool:
+          vmImage: $(vmImage)
+        steps:
+          - script: |
+              curl -f https://myapp.com/health || exit 1
+              curl -f https://myapp.com/ready || exit 1
+            displayName: 'Health check'
+          
+          - script: npm run test:smoke
+            displayName: 'Run smoke tests'
+
+      - job: NotifySlack
+        displayName: 'Notify Slack'
+        dependsOn: SmokeTests
+        condition: always()
+        steps:
+          - task: PowerShell@2
+            inputs:
+              targetType: 'inline'
+              script: |
+                $status = "$(Agent.JobStatus)"
+                $webhook = "$(SLACK_WEBHOOK)"
+                $payload = @{
+                  text = "Deployment $status for build $(Build.BuildId)"
+                } | ConvertTo-Json
+                Invoke-RestMethod -Uri $webhook -Method Post -Body $payload -ContentType 'application/json'

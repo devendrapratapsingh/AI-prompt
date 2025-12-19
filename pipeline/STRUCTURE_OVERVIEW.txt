@@ -1,0 +1,149 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    CI/CD PIPELINE DIRECTORY STRUCTURE                      ║
+║                          COMPREHENSIVE OVERVIEW                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📦 PIPELINE ROOT
+│
+├── 📄 README.md                          Main guide & quick selection
+├── 📄 PLATFORM_CATALOG.md               Complete platform catalog & comparison
+├── 📄 STRUCTURE_OVERVIEW.txt            This file
+│
+└── 📁 CI/CD PLATFORM DIRECTORIES (20 Total)
+
+    ┌─────────────────────────────────────────────────────────────┐
+    │ GROUP 1: CLOUD PROVIDER NATIVE SERVICES (5)                │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ✓ github-actions/                 GitHub Actions (Microsoft)
+    ✓ gitlab-ci/                      GitLab CI (GitLab)
+    ✓ azure-pipelines/                Azure Pipelines (Microsoft)
+    ✓ aws-codepipeline/               AWS CodePipeline (Amazon)
+    ✓ gcp-cloud-build/                GCP Cloud Build (Google)
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ GROUP 2: STANDALONE SAAS PLATFORMS (7)                      │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ✓ circleci/                       CircleCI (CircleCI Inc)
+    ✓ travis-ci/                      Travis CI (Idera/Travis Labs)
+    ✓ appveyor/                       AppVeyor (Appveyor Systems)
+    ✓ bitbucket-pipelines/            Bitbucket Pipelines (Atlassian)
+    ✓ buildkite/                      Buildkite (Buildkite Inc)
+    ✓ drone-ci/                       Drone CI (Open Source)
+    ✓ concourse-ci/                   Concourse CI (Open Source)
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ GROUP 3: ENTERPRISE SELF-HOSTED SERVERS (4)                │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ✓ jenkins/                        Jenkins (Open Source)
+    ✓ teamcity/                       TeamCity (JetBrains)
+    ✓ cloudbees/                      CloudBees (CloudBees Inc)
+    ✓ gocd/                           GoCD (ThoughtWorks)
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ GROUP 4: CLOUD-NATIVE & KUBERNETES (3)                     │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ✓ tekton/                         Tekton (Linux Foundation)
+    ✓ spinnaker/                      Spinnaker (Netflix/Google)
+    ✓ harness/                        Harness (Harness Inc)
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ GROUP 5: SPECIALIZED INFRASTRUCTURE TOOLS (1)               │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ✓ pulumi-automation/              Pulumi Automation (Pulumi Corp)
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                      EACH PLATFORM CONTAINS:                               ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+  📁 [platform-name]/
+  │
+  ├── 📄 README.md                     Platform overview & quick start
+  │
+  ├── 📁 templates/                    Configuration file templates
+  │   ├── basic.yml
+  │   ├── advanced.yml
+  │   ├── with-deployment.yml
+  │   └── ...
+  │
+  ├── �� examples/                     Real-world workflow examples
+  │   ├── java-spring-boot/
+  │   ├── python-fastapi/
+  │   ├── nodejs-express/
+  │   └── ...
+  │
+  ├── 📁 docs/                         Detailed configuration guides
+  │   ├── getting-started.md
+  │   ├── best-practices.md
+  │   ├── advanced-config.md
+  │   └── troubleshooting.md
+  │
+  └── 📁 scripts/                      Helper scripts for setup
+      ├── setup.sh
+      ├── validate.sh
+      ├── migrate.sh
+      └── ...
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         QUICK SELECTION GUIDE                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+  GitHub User?              → github-actions/
+  GitLab User?              → gitlab-ci/
+  Azure DevOps?             → azure-pipelines/
+  AWS Shop?                 → aws-codepipeline/
+  GCP Shop?                 → gcp-cloud-build/
+  Kubernetes Environment?   → tekton/
+  Enterprise Java?          → jenkins/ or teamcity/
+  Windows/.NET?             → azure-pipelines/ or appveyor/
+  High Performance?         → buildkite/
+  Advanced Deployments?     → spinnaker/ or harness/
+  Infrastructure as Code?   → pulumi-automation/
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                          STATISTICS                                        ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+  Total Platforms:          20
+  Total Directories:        101 (20 platforms × 5 subdirs + 1 root)
+  Documentation Files:      42 README.md files
+  Template Locations:       20 directories
+  Example Locations:        20 directories
+  Documentation Locations:  20 directories
+  Script Locations:         20 directories
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                        KEY ADVANTAGES                                      ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+  ✅ Comprehensive coverage of ALL major CI/CD platforms
+  ✅ Organized by platform groups (Cloud Native, SaaS, Self-hosted, etc.)
+  ✅ Each platform has structured subdirectories (templates, examples, docs, scripts)
+  ✅ Easy to navigate with clear README.md files at each level
+  ✅ Platform selection guide helps teams choose the right tool
+  ✅ Real-world examples for common tech stacks
+  ✅ Migration guides from one platform to another
+  ✅ Comparison matrices for feature analysis
+  ✅ Security & compliance considerations included
+  ✅ Quick-start scripts for rapid deployment
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                        NEXT STEPS                                          ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+  1. Read pipeline/README.md for platform selection
+  2. Review pipeline/PLATFORM_CATALOG.md for detailed comparison
+  3. Navigate to your chosen platform subdirectory
+  4. Copy templates/ files to your project
+  5. Follow docs/ guides for configuration
+  6. Use scripts/ for automation and validation
+  7. Refer to examples/ for similar tech stacks
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  LAST UPDATED: 2025-12-19                                 ║
+║          Maintained as part of the AI-prompt repository                   ║
+╚════════════════════════════════════════════════════════════════════════════╝

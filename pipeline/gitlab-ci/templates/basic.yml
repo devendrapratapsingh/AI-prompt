@@ -1,0 +1,181 @@
+stages:
+  - build
+  - test
+  - quality
+  - security
+  - deploy
+
+variables:
+  REGISTRY: registry.gitlab.com
+  IMAGE_NAME: $CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME
+  NODE_ENV: production
+
+cache:
+  key:
+    files:
+      - package-lock.json
+  paths:
+    - node_modules/
+
+# Stage 1: Build
+build:
+  stage: build
+  image: node:18-alpine
+  
+  script:
+    - echo "Building application..."
+    - npm ci --prefer-offline
+    - npm run build
+    - echo "Build completed successfully"
+  
+  artifacts:
+    paths:
+      - dist/
+      - node_modules/.bin/
+    expire_in: 1 day
+  
+  only:
+    - main
+    - develop
+    - merge_requests
+  
+  tags:
+    - docker
+
+# Stage 2: Test
+unit-test:
+  stage: test
+  image: node:18-alpine
+  needs: ["build"]
+  
+  script:
+    - npm ci --prefer-offline
+    - npm run test:unit -- --coverage --reporter=json
+  
+  artifacts:
+    paths:
+      - coverage/
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+  
+  coverage: '/Lines\s*:\s*(\d+.\d+)%/'
+  
+  allow_failure: false
+
+integration-test:
+  stage: test
+  image: node:18-alpine
+  needs: ["build"]
+  services:
+    - postgres:14
+  
+  variables:
+    POSTGRES_DB: test_db
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+    DATABASE_URL: "postgresql://test:test@postgres:5432/test_db"
+  
+  script:
+    - npm ci --prefer-offline
+    - npm run test:integration
+  
+  allow_failure: true
+
+# Stage 3: Code Quality
+code-quality:
+  stage: quality
+  image: node:18-alpine
+  needs: ["build"]
+  
+  script:
+    - npm ci --prefer-offline
+    - npm run lint
+    - npm run lint:style
+  
+  artifacts:
+    reports:
+      codequality: codequality.json
+  
+  allow_failure: true
+
+# Stage 4: Security
+sast:
+  stage: security
+  image: returntocorp/semgrep:latest
+  needs: ["build"]
+  
+  script:
+    - semgrep --json --output=sast-report.json src/
+  
+  artifacts:
+    reports:
+      sast: sast-report.json
+  
+  allow_failure: true
+
+dependency-check:
+  stage: security
+  image: node:18-alpine
+  needs: ["build"]
+  
+  script:
+    - npm audit --json > dependency-report.json || true
+  
+  artifacts:
+    paths:
+      - dependency-report.json
+  
+  allow_failure: true
+
+# Stage 5: Deploy
+deploy-staging:
+  stage: deploy
+  image: alpine:latest
+  needs: ["build", "unit-test", "code-quality", "sast"]
+  
+  environment:
+    name: staging
+    url: https://staging.example.com
+    deployment_tier: staging
+  
+  script:
+    - apk add --no-cache openssh-client rsync
+    - mkdir -p ~/.ssh
+    - echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+    - chmod 600 ~/.ssh/deploy_key
+    - ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts 2>/dev/null
+    - rsync -avz -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" dist/ deploy@$DEPLOY_HOST:/app/staging/
+    - ssh -i ~/.ssh/deploy_key deploy@$DEPLOY_HOST "cd /app/staging && ./deploy.sh"
+  
+  only:
+    - develop
+  
+  when: manual
+
+deploy-production:
+  stage: deploy
+  image: alpine:latest
+  needs: ["build", "unit-test", "code-quality", "sast"]
+  
+  environment:
+    name: production
+    url: https://app.example.com
+    deployment_tier: production
+    auto_stop_in: never
+  
+  script:
+    - apk add --no-cache openssh-client rsync curl
+    - mkdir -p ~/.ssh
+    - echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+    - chmod 600 ~/.ssh/deploy_key
+    - ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts 2>/dev/null
+    - rsync -avz -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" dist/ deploy@$DEPLOY_HOST:/app/production/
+    - ssh -i ~/.ssh/deploy_key deploy@$DEPLOY_HOST "cd /app/production && ./deploy.sh && ./health-check.sh"
+    - curl -f https://app.example.com/health || exit 1
+  
+  only:
+    - main
+  
+  when: manual

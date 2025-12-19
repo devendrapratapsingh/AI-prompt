@@ -1,0 +1,56 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: "us-east-1"
+    ARTIFACT_BUCKET: "my-artifacts"
+  secrets-manager:
+    DOCKER_PASSWORD: dockerhub:password
+    SLACK_WEBHOOK: slackwebhook:url
+
+phases:
+  pre_build:
+    commands:
+      - echo "Pre-build phase starting..."
+      - npm ci --prefer-offline --audit=false
+      - |
+        if [ "$CODEBUILD_WEBHOOK_TRIGGER" == "branch/main" ]; then
+          export ENVIRONMENT="production"
+        else
+          export ENVIRONMENT="staging"
+        fi
+
+  build:
+    commands:
+      - echo "Build phase starting..."
+      - npm run build
+      - npm run test -- --coverage
+      - npm run lint
+      - npm run security-check
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" -eq 1 ]; then
+          echo "Build successful"
+          aws s3 cp dist/ s3://$ARTIFACT_BUCKET/$CODEBUILD_RESOLVED_SOURCE_VERSION/ --recursive
+        fi
+
+  post_build:
+    commands:
+      - echo "Post-build phase..."
+      - |
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"Build completed: $CODEBUILD_BUILD_ID\"}" \
+          $SLACK_WEBHOOK
+      - printf '[{"name":"myapp","imageUri":"%s"}]' $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/myapp:$CODEBUILD_RESOLVED_SOURCE_VERSION > imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - dist/**/*
+    - coverage/**/*
+  name: AdvancedBuildArtifact
+  discard-paths: no
+
+cache:
+  paths:
+    - 'node_modules/**/*'
+    - '.npm/**/*'
