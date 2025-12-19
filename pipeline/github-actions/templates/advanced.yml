@@ -1,0 +1,496 @@
+name: Advanced CI/CD Pipeline with Multi-Branch & Conditional Deployments
+
+on:
+  push:
+    branches: [ main, develop, 'feature/**' ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+# Limit concurrent deployments to prevent race conditions
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Stage 1: Build with matrix for multiple environments
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      version: ${{ steps.version.outputs.version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for versioning
+      
+      - name: Generate version
+        id: version
+        run: |
+          VERSION=$(echo ${{ github.ref }} | sed 's#refs/tags/##')
+          if [ "$VERSION" = "refs/heads/main" ] || [ "$VERSION" = "refs/heads/develop" ]; then
+            VERSION=$(date +%Y%m%d).$(git rev-parse --short HEAD)
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies with production flag
+        env:
+          NODE_ENV: ${{ matrix.environment }}
+        run: npm ci --only=production
+      
+      - name: Build application
+        env:
+          NODE_ENV: ${{ matrix.environment }}
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: npm run build:${{ matrix.environment }}
+      
+      - name: Create build metadata
+        run: |
+          cat > build-metadata.json <<EOF
+          {
+            "version": "${{ steps.version.outputs.version }}",
+            "commit": "${{ github.sha }}",
+            "branch": "${{ github.ref }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "environment": "${{ matrix.environment }}"
+          }
+          EOF
+          cat build-metadata.json >> dist/metadata.json
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.environment }}
+          path: dist/
+          retention-days: 5
+
+  # Stage 2: Parallel Tests (unit, integration, e2e)
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      matrix:
+        test-suite: [unit, integration, e2e]
+      fail-fast: false  # Continue running other tests even if one fails
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run ${{ matrix.test-suite }} tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/test
+          REDIS_URL: redis://localhost:6379
+        run: npm run test:${{ matrix.test-suite }} -- --coverage --bail=false
+      
+      - name: Upload coverage to Codecov
+        if: matrix.test-suite == 'unit'
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/lcov.info
+          flags: ${{ matrix.test-suite }}
+          fail_ci_if_error: true
+      
+      - name: Archive test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.test-suite }}
+          path: |
+            coverage/
+            test-results/
+          retention-days: 30
+
+  # Stage 3: Code Quality with multiple tools
+  quality:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      checks: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for quality analysis
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run ESLint
+        continue-on-error: true
+        run: npm run lint -- --format json > eslint-report.json
+      
+      - name: Publish ESLint results
+        if: always()
+        uses: ataylorme/eslint-annotate-action@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          report-json: eslint-report.json
+      
+      - name: Run SonarQube Analysis
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      
+      - name: Check code coverage threshold
+        run: |
+          npm test -- --coverage
+          COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
+          echo "Current coverage: $COVERAGE%"
+          if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+            echo "❌ Coverage $COVERAGE% is below 80% threshold"
+            exit 1
+          fi
+          echo "✅ Coverage $COVERAGE% meets threshold"
+
+  # Stage 4: Security & Compliance
+  security:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run npm audit
+        continue-on-error: true
+        run: npm audit --production --json > npm-audit.json
+      
+      - name: Parse npm audit results
+        run: |
+          VULNERABILITIES=$(jq '.metadata.vulnerabilities.total' npm-audit.json)
+          echo "Found $VULNERABILITIES vulnerabilities"
+          if [ "$VULNERABILITIES" -gt 0 ]; then
+            jq '.vulnerabilities[] | select(.severity=="critical" or .severity=="high")' npm-audit.json
+          fi
+      
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+      
+      - name: Run Trivy image scan (if building Docker)
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          image-ref: 'node:18-alpine'
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+      
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-fs.sarif'
+      
+      - name: Run OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        continue-on-error: true
+        with:
+          project: 'MyProject'
+          path: '.'
+          format: 'JSON'
+      
+      - name: Upload dependency-check report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-check-report
+          path: dependency-check-report.json
+
+  # Stage 5: Build Docker image
+  build-image:
+    runs-on: ubuntu-latest
+    needs: [test, quality, security]
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tags: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Conditional deployment based on branch/conditions
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [build-image, test, quality, security]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://staging.example.com
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-staging
+          aws-region: us-east-1
+      
+      - name: Deploy to ECS Staging
+        run: |
+          aws ecs update-service \
+            --cluster staging-cluster \
+            --service myapp-service \
+            --force-new-deployment \
+            --region us-east-1
+      
+      - name: Wait for deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster staging-cluster \
+            --services myapp-service \
+            --region us-east-1
+      
+      - name: Run smoke tests
+        run: |
+          for i in {1..30}; do
+            if curl -f https://staging.example.com/health; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: Health check failed, retrying..."
+            sleep 10
+          done
+          echo "❌ Health check failed after 30 attempts"
+          exit 1
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [build-image, test, quality, security]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://example.com
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-production
+          aws-region: us-east-1
+      
+      - name: Create deployment
+        id: deployment
+        run: |
+          DEPLOYMENT_ID=$(aws ecs update-service \
+            --cluster prod-cluster \
+            --service myapp-service \
+            --force-new-deployment \
+            --region us-east-1 | jq -r '.service.taskDefinition')
+          echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+      
+      - name: Wait for deployment with timeout
+        timeout-minutes: 10
+        run: |
+          aws ecs wait services-stable \
+            --cluster prod-cluster \
+            --services myapp-service \
+            --region us-east-1
+      
+      - name: Run smoke tests
+        run: |
+          for i in {1..30}; do
+            if curl -f https://example.com/health; then
+              echo "✅ Production health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: Health check failed, retrying..."
+            sleep 10
+          done
+          echo "❌ Production health check failed"
+          exit 1
+      
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "🔄 Initiating rollback..."
+          aws ecs update-service \
+            --cluster prod-cluster \
+            --service myapp-service \
+            --task-definition myapp:$(($TASK_REVISION - 1)) \
+            --region us-east-1
+      
+      - name: Notify deployment status
+        if: always()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          payload: |
+            {
+              "text": "Production deployment ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚀 Production Deployment"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status*\n${{ job.status }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit*\n${{ github.sha }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch*\n${{ github.ref_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author*\n${{ github.actor }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
+  # Final notification
+  notify:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test, quality, security, build-image]
+    
+    steps:
+      - name: Send workflow summary
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          payload: |
+            {
+              "text": "Workflow completed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow Summary*\nRepository: ${{ github.repository }}\nBranch: ${{ github.ref_name }}\nResult: ${{ needs.test.result }}"
+                  }
+                }
+              ]
+            }

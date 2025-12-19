@@ -1,0 +1,158 @@
+stages:
+  - build
+  - test
+  - quality
+  - security
+  - deploy
+
+trigger:
+  branch: main
+  events:
+    - push
+    - merge_request
+    - schedule
+
+variables:
+  REGISTRY: registry.gitlab.com
+  IMAGE_NAME: $CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME
+  NODE_ENV: production
+  DOCKER_DRIVER: overlay2
+
+default:
+  image: node:18-alpine
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+  tags:
+    - docker
+
+# Stage 1: Build
+build:
+  stage: build
+  script:
+    - npm ci --prefer-offline
+    - npm run build
+    - npm run build:docker
+  artifacts:
+    paths:
+      - dist/
+      - docker-image/
+    expire_in: 1 day
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+
+# Stage 2: Test
+unit-test:
+  stage: test
+  needs: ["build"]
+  parallel: 3
+  script:
+    - npm ci
+    - npm run test:unit -- --shard=$CI_NODE_INDEX/$CI_NODE_TOTAL --coverage
+  coverage: '/Lines\s*:\s*(\d+\.\d+)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+
+integration-test:
+  stage: test
+  needs: ["build"]
+  services:
+    - postgres:14
+    - redis:7
+  variables:
+    POSTGRES_DB: test
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+  script:
+    - npm ci
+    - npm run test:integration
+  allow_failure: true
+
+# Stage 3: Quality
+code-quality:
+  stage: quality
+  needs: ["build"]
+  script:
+    - npm ci
+    - npm run lint
+    - npm run format:check
+  allow_failure: true
+
+sonarqube:
+  stage: quality
+  needs: ["build"]
+  image: sonarsource/sonar-scanner-cli:latest
+  script:
+    - sonar-scanner -Dsonar.projectKey=$CI_PROJECT_NAME
+  allow_failure: true
+
+# Stage 4: Security
+sast:
+  stage: security
+  needs: ["build"]
+  image: returntocorp/semgrep:latest
+  script:
+    - semgrep --json --output=semgrep-report.json src/
+  artifacts:
+    reports:
+      sast: semgrep-report.json
+  allow_failure: true
+
+dependency-scan:
+  stage: security
+  needs: ["build"]
+  script:
+    - npm audit --json > audit.json || true
+  artifacts:
+    paths:
+      - audit.json
+  allow_failure: true
+
+# Stage 5: Deploy
+deploy-staging:
+  stage: deploy
+  needs: ["build", "unit-test", "code-quality", "sast"]
+  environment:
+    name: staging
+    url: https://staging.example.com
+    deployment_tier: staging
+  script:
+    - apk add --no-cache openssh-client rsync
+    - mkdir -p ~/.ssh && echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+    - chmod 600 ~/.ssh/deploy_key
+    - ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts 2>/dev/null
+    - rsync -avz -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" dist/ deploy@$DEPLOY_HOST:/app/staging/
+    - ssh -i ~/.ssh/deploy_key deploy@$DEPLOY_HOST "cd /app/staging && bash deploy.sh && bash health-check.sh"
+  only:
+    - develop
+  when: manual
+
+deploy-production:
+  stage: deploy
+  needs: ["build", "unit-test", "code-quality", "sast", "integration-test"]
+  environment:
+    name: production
+    url: https://app.example.com
+    deployment_tier: production
+    auto_stop_in: never
+  script:
+    - apk add --no-cache openssh-client rsync curl
+    - mkdir -p ~/.ssh && echo "$PROD_DEPLOY_KEY" > ~/.ssh/deploy_key
+    - chmod 600 ~/.ssh/deploy_key
+    - ssh-keyscan -H $PROD_DEPLOY_HOST >> ~/.ssh/known_hosts 2>/dev/null
+    - ssh -i ~/.ssh/deploy_key deploy@$PROD_DEPLOY_HOST "cd /app && bash backup.sh"
+    - rsync -avz -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" dist/ deploy@$PROD_DEPLOY_HOST:/app/production/
+    - ssh -i ~/.ssh/deploy_key deploy@$PROD_DEPLOY_HOST "cd /app/production && bash deploy.sh"
+    - "for i in {1..30}; do curl -f https://app.example.com/health && exit 0 || sleep 10; done; exit 1"
+  only:
+    - main
+  when: manual
